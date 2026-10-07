@@ -35,6 +35,7 @@
 
       <fieldset>
         <legend>Texterkennung</legend>
+        <label id="ocr-sample" hidden><input type="radio" name="ocr" value="sample"> Claude über dein Claude-Konto (empfohlen, kein Schlüssel nötig)</label>
         <label><input type="radio" name="ocr" value="tesseract" checked> Kostenlos im Browser (Tesseract) – Ergebnis meist nachbessern</label>
         <label><input type="radio" name="ocr" value="claude"> Claude-KI (genauer, eigener API-Schlüssel nötig)</label>
         <div id="claude-settings" hidden>

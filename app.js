@@ -66,9 +66,11 @@ async function handleFiles(fileList) {
       const canvas = await loadImage(files[i]);
       $('#preview').src = canvas.toDataURL('image/jpeg', 0.8);
       $('#preview-wrap').hidden = false;
-      const entries = ocrMethod() === 'claude'
-        ? await recognizeWithClaude(canvas, (s) => setStatus(prefix + s))
-        : await recognizeWithTesseract(canvas, (s) => setStatus(prefix + s));
+      const report = (s) => setStatus(prefix + s);
+      const method = ocrMethod();
+      const entries = method === 'sample' ? await recognizeWithSample(canvas, report)
+        : method === 'claude' ? await recognizeWithClaude(canvas, report)
+          : await recognizeWithTesseract(canvas, report);
       entries.forEach((e) => list.entries.push({
         en: e.en || '', de: e.de || '', note: cleanNote(e.note || ''), on: !e.optional,
       }));
@@ -257,14 +259,8 @@ function kmeans1d(xs, k) {
   return c.sort((a, b) => a - b);
 }
 
-// ----- Claude (genauer, braucht API-Schlüssel) -----
-async function recognizeWithClaude(canvas, report) {
-  const key = $('#api-key').value.trim();
-  if (!key) throw new Error('Bitte zuerst einen API-Schlüssel eintragen.');
-  store.set('vd.apikey', key);
-  report('Bild wird an Claude gesendet …');
-  const base64 = canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
-  const prompt = `Das Foto zeigt eine Vokabelseite ("Vocabulary") aus einem deutschen Englisch-Schulbuch.
+// ----- Claude: gemeinsame Anweisung -----
+const VOCAB_PROMPT = `Das Foto zeigt eine Vokabelseite ("Vocabulary") aus einem deutschen Englisch-Schulbuch.
 Aufbau: Jede Zeile hat links das englische Wort mit Lautschrift in eckigen Klammern, in der Mitte die
 deutsche Bedeutung und rechts (grau hinterlegt) einen Beispielsatz oder Merkhinweis (z. B. "necessary ↔ unnecessary",
 "belief → to believe"). Ein Eintrag kann über zwei Zeilen umbrechen. Es gibt umrahmte Kästen (z. B. "Respect", "Jobs")
@@ -281,6 +277,70 @@ Regeln:
 - Überschriften (z. B. "Station 1", "Way in", "Unit 1 ..."), Seitenverweise ("p. 12"), Seitenzahlen, Erklärtexte und die
   Symbol-Legende weglassen.
 - Unleserliche oder abgeschnittene Einträge so gut wie möglich übernehmen, nichts erfinden.`;
+
+// ----- Claude über das eigene Claude-Konto (nur wenn die Seite auf claude.ai läuft) -----
+let sampleFn = null;
+let sampleMaxImages = 1;
+if (window.claude && typeof window.claude.use === 'function') {
+  window.claude.use('sample').then(async (sample) => {
+    if (!sample) return;
+    const limits = await sample.limits().catch(() => null);
+    if (!limits || !limits.images) return;
+    sampleFn = sample;
+    sampleMaxImages = limits.images.maxCount;
+    $('#ocr-sample').hidden = false;
+    $('input[name=ocr][value=sample]').checked = true;
+    $('#claude-settings').hidden = true;
+  }).catch(() => {});
+}
+
+function canvasToBlob(c) {
+  return new Promise((resolve) => c.toBlob(resolve, 'image/jpeg', 0.9));
+}
+
+async function recognizeWithSample(canvas, report) {
+  if (!sampleFn) throw new Error('Claude ist hier nicht verfügbar.');
+  // Bilder werden auf ca. 1,2 Megapixel verkleinert – darum die Seite in eine obere und
+  // untere Hälfte teilen, damit die kleine Schrift lesbar bleibt.
+  const parts = [];
+  const n = sampleMaxImages >= 2 ? 2 : 1;
+  for (let i = 0; i < n; i++) {
+    const h = Math.ceil(canvas.height / n);
+    const c = document.createElement('canvas');
+    c.width = canvas.width; c.height = Math.min(h, canvas.height - i * h);
+    c.getContext('2d').drawImage(canvas, 0, -i * h);
+    parts.push(await canvasToBlob(c));
+  }
+  const intro = n === 2
+    ? 'Du bekommst ZWEI Bilder: die obere und die untere Hälfte DERSELBEN Seite. Eine Zeile, die an der Schnittkante durchgeschnitten ist, nur einmal aufnehmen.\n\n'
+    : '';
+  report('Claude liest die Seite … (dauert meist 20–60 Sekunden)');
+  try {
+    const result = await sampleFn.json(intro + VOCAB_PROMPT, { images: parts });
+    if (!Array.isArray(result)) throw { code: 'invalid_json' };
+    return result.filter((e) => e && (e.en || e.de)).map((e) => ({
+      en: String(e.en || ''), de: String(e.de || ''), note: String(e.note || ''), optional: !!e.optional,
+    }));
+  } catch (e) {
+    const msg = {
+      not_granted: 'Du hast der Seite nicht erlaubt, Claude zu benutzen.',
+      rate_limited: 'Zu viele Anfragen oder Nutzungslimit erreicht – bitte später nochmal.',
+      image_rejected: 'Das Bild wurde nicht angenommen (Format/Größe).',
+      invalid_json: 'Claude hat keine lesbare Liste geliefert – bitte nochmal versuchen.',
+      refused: 'Claude hat die Anfrage abgelehnt.',
+    }[e && e.code];
+    throw new Error(msg || `Claude-Fehler (${(e && (e.code || e.message)) || e}).`);
+  }
+}
+
+// ----- Claude mit eigenem API-Schlüssel -----
+async function recognizeWithClaude(canvas, report) {
+  const key = $('#api-key').value.trim();
+  if (!key) throw new Error('Bitte zuerst einen API-Schlüssel eintragen.');
+  store.set('vd.apikey', key);
+  report('Bild wird an Claude gesendet …');
+  const base64 = canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
+  const prompt = VOCAB_PROMPT;
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
