@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vokabel-Diktierer</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>Vokabel-Diktierer</h1>
+    <nav>
+      <button data-tab="import" class="tab active">1. Seite scannen</button>
+      <button data-tab="list" class="tab">2. Vokabeln prüfen</button>
+      <button data-tab="dictate" class="tab">3. Diktat</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- 1. Import -->
+    <section id="tab-import" class="panel active">
+      <h2>Buchseite einscannen oder Bild hochladen</h2>
+      <div class="row">
+        <label class="btn primary">
+          📷 Seite fotografieren
+          <input id="camera-input" type="file" accept="image/*" capture="environment" hidden>
+        </label>
+        <label class="btn">
+          🖼️ Bild hochladen
+          <input id="file-input" type="file" accept="image/*" multiple hidden>
+        </label>
+      </div>
+
+      <fieldset>
+        <legend>Texterkennung</legend>
+        <label><input type="radio" name="ocr" value="tesseract" checked> Kostenlos im Browser (Tesseract) – Ergebnis meist nachbessern</label>
+        <label><input type="radio" name="ocr" value="claude"> Claude-KI (genauer, eigener API-Schlüssel nötig)</label>
+        <div id="claude-settings" hidden>
+          <label>API-Schlüssel
+            <input id="api-key" type="password" placeholder="sk-ant-..." autocomplete="off">
+          </label>
+          <small>Der Schlüssel wird nur in diesem Browser gespeichert und direkt an api.anthropic.com gesendet.</small>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Aufbau der Buchseite (Spalten von links nach rechts)</legend>
+        <select id="layout">
+          <option value="en,de,note" selected>Englisch | Deutsch | Merksatz (wie im Buch)</option>
+          <option value="en,note,de">Englisch | Merksatz | Deutsch</option>
+          <option value="en,de">Englisch | Deutsch (ohne Merksatz)</option>
+        </select>
+        <label><input id="append" type="checkbox" checked> An die aktuelle Liste anhängen (mehrere Seiten)</label>
+      </fieldset>
+
+      <div id="preview-wrap" hidden>
+        <img id="preview" alt="Vorschau der Buchseite">
+      </div>
+      <div id="ocr-status" class="status" hidden></div>
+    </section>
+
+    <!-- 2. Liste -->
+    <section id="tab-list" class="panel">
+      <h2>Vokabeln prüfen und korrigieren</h2>
+      <div class="row">
+        <select id="list-select"></select>
+        <button id="list-new" class="btn">Neue Liste</button>
+        <button id="list-rename" class="btn">Umbenennen</button>
+        <button id="list-delete" class="btn danger">Löschen</button>
+      </div>
+      <p class="hint">Die Erkennung ist nie perfekt. Bitte jede Zeile kurz prüfen – das Diktat liest genau das vor, was hier steht.</p>
+      <div class="table-wrap">
+        <table id="vocab-table">
+          <thead><tr><th>✓</th><th>Englisch</th><th>Deutsch</th><th>Merksatz / Beispiel</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="row">
+        <button id="row-add" class="btn">+ Zeile</button>
+        <button id="go-dictate" class="btn primary">Weiter zum Diktat →</button>
+      </div>
+    </section>
+
+    <!-- 3. Diktat -->
+    <section id="tab-dictate" class="panel">
+      <h2>Diktat</h2>
+
+      <fieldset>
+        <legend>Was soll diktiert werden?</legend>
+        <select id="preset">
+          <option value="en-de">Englisch + Deutsch schreiben</option>
+          <option value="en-de-note">Englisch + Deutsch + Merksatz schreiben</option>
+          <option value="en-de-hearnote" selected>Englisch + Deutsch schreiben, Merksatz nur anhören</option>
+          <option value="en-only">Nur Englisch schreiben (Deutsch als Hilfe anhören)</option>
+          <option value="de-en">Abfrage: Deutsch hören → Englisch schreiben</option>
+          <option value="custom">Eigene Einstellung …</option>
+        </select>
+
+        <div class="grid3">
+          <label>Englisch
+            <select id="mode-en" class="mode"><option value="write">schreiben</option><option value="speak">nur anhören</option><option value="off">aus</option></select>
+          </label>
+          <label>Deutsch
+            <select id="mode-de" class="mode"><option value="write">schreiben</option><option value="speak">nur anhören</option><option value="off">aus</option></select>
+          </label>
+          <label>Merksatz
+            <select id="mode-note" class="mode"><option value="write">schreiben</option><option value="speak">nur anhören</option><option value="off">aus</option></select>
+          </label>
+        </div>
+        <label>Reihenfolge
+          <select id="order">
+            <option value="en,de,note">Englisch → Deutsch → Merksatz</option>
+            <option value="de,en,note">Deutsch → Englisch → Merksatz</option>
+            <option value="en,note,de">Englisch → Merksatz → Deutsch</option>
+          </select>
+        </label>
+      </fieldset>
+
+      <details>
+        <summary>Tempo &amp; Extras</summary>
+        <label>Sprechtempo <input id="rate" type="range" min="0.5" max="1.2" step="0.05" value="0.85"> <span id="rate-val"></span></label>
+        <label>Schreibzeit pro Buchstabe (Sek.) <input id="per-char" type="number" min="0" max="3" step="0.1" value="0.6"></label>
+        <label>Mindest-Schreibzeit (Sek.) <input id="min-pause" type="number" min="0" max="30" step="0.5" value="3"></label>
+        <label>Wie oft vorlesen (Schreib-Felder) <input id="repeats" type="number" min="1" max="3" value="2"></label>
+        <label><input id="spell" type="checkbox"> Englisches Wort zusätzlich buchstabieren</label>
+        <label><input id="announce" type="checkbox" checked> Ansage („Englisch“, „Deutsch“, „Merksatz“)</label>
+        <label><input id="shuffle" type="checkbox"> Zufällige Reihenfolge</label>
+        <label><input id="only-checked" type="checkbox" checked> Nur angehakte Vokabeln</label>
+        <label>Englische Stimme <select id="voice-en"></select></label>
+        <label>Deutsche Stimme <select id="voice-de"></select></label>
+      </details>
+
+      <div class="player">
+        <div id="progress">–</div>
+        <div id="now" class="now">Drück auf Start.</div>
+        <div id="now-hint" class="hint"></div>
+        <div class="row center">
+          <button id="prev" class="btn" title="Vorherige Vokabel">⏮</button>
+          <button id="repeat" class="btn" title="Aktuelle Vokabel wiederholen">🔁</button>
+          <button id="play" class="btn primary big">▶ Start</button>
+          <button id="next" class="btn" title="Nächste Vokabel">⏭</button>
+        </div>
+        <label><input id="show-text" type="checkbox"> Text beim Diktat anzeigen (sonst erst bei der Kontrolle)</label>
+      </div>
+
+      <details id="check-wrap">
+        <summary>Kontrolle – Lösungen anzeigen</summary>
+        <ol id="check-list"></ol>
+      </details>
+    </section>
+  </main>
+</body>
+</html>
