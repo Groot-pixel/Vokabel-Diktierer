@@ -440,7 +440,7 @@ const PRESETS = {
   'de-en': { en: 'write', de: 'speak', note: 'off', order: 'de,en,note' },
 };
 const settingIds = ['preset', 'mode-en', 'mode-de', 'mode-note', 'order', 'rate', 'per-char', 'min-pause', 'repeats',
-  'spell', 'announce', 'shuffle', 'only-checked', 'show-text'];
+  'spell-en', 'announce', 'shuffle', 'only-checked', 'show-text'];
 
 function applyPreset(name) {
   const p = PRESETS[name];
@@ -539,11 +539,14 @@ function buildSteps() {
       const lang = f === 'de' ? 'de' : 'en';
       const label = mode === 'speak' ? `${LABEL[f]}, nur zuhören:` : `${LABEL[f]}:`;
       if (announce) out.push({ entry: idx, type: 'speak', lang: 'de', text: label, field: f });
-      const times = mode === 'write' ? repeats : 1;
+      // Englisch beim Schreiben: 1. Mal normal, 2. Mal buchstabiert (ggf. danach wieder normal)
+      const spell = mode === 'write' && f === 'en' && $('#spell-en').checked;
+      const times = mode === 'write' ? (spell ? Math.max(2, repeats) : repeats) : 1;
       for (let r = 0; r < times; r++) {
-        out.push({ entry: idx, type: 'speak', lang, text, field: f, mode });
-        if (mode === 'write' && f === 'en' && r === 0 && $('#spell').checked) {
-          out.push({ entry: idx, type: 'speak', lang: 'en', text: spellOut(text), field: f, mode, rate: 0.8 });
+        if (spell && r === 1) {
+          out.push({ entry: idx, type: 'speak', lang: 'en', text: spellOut(text), field: f, mode, rate: 0.8, spelled: true });
+        } else {
+          out.push({ entry: idx, type: 'speak', lang, text, field: f, mode });
         }
         if (mode === 'write') {
           const pause = Math.max(minPause, text.length * perChar) * (r === times - 1 ? 1 : 0.6);
@@ -560,9 +563,16 @@ function buildSteps() {
 }
 
 function spellOut(text) {
-  // Buchstaben einzeln, Leerzeichen als Pause
-  return text.replace(/\(.*?\)/g, '').split(' ').filter(Boolean)
-    .map((w) => w.split('').filter((c) => /[a-zA-Z']/.test(c)).join(', ')).join('. – ');
+  // Großbuchstaben werden von den Stimmen zuverlässig als Buchstabe gelesen ("A" statt "a" wie "uh").
+  // Wörter durch eine Pause trennen, Bindestrich/Apostroph aussprechen.
+  return text.replace(/\(.*?\)/g, ' ').split(/\s+/).filter(Boolean)
+    .map((w) => w.split('').map((c) => {
+      if (/[a-zA-Z]/.test(c)) return c.toUpperCase();
+      if (c === '-') return 'hyphen';
+      if (c === "'" || c === '’') return 'apostrophe';
+      return null;
+    }).filter(Boolean).join(', '))
+    .filter(Boolean).join('. ... ');
 }
 function shuffle(a) {
   for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
@@ -653,7 +663,7 @@ $('#prev').addEventListener('click', () => { if (steps.length) jumpToEntry(Math.
 $('#repeat').addEventListener('click', () => { if (steps.length) jumpToEntry(currentEntryIdx()); });
 
 // Einstellungen geändert → Diktat neu aufbauen (beim nächsten Start)
-['#mode-en', '#mode-de', '#mode-note', '#order', '#preset', '#repeats', '#per-char', '#min-pause', '#spell', '#announce', '#shuffle', '#only-checked']
+['#mode-en', '#mode-de', '#mode-note', '#order', '#preset', '#repeats', '#per-char', '#min-pause', '#spell-en', '#announce', '#shuffle', '#only-checked']
   .forEach((s) => $(s).addEventListener('change', () => { stop(); steps = []; stepIndex = 0; updateNow(); }));
 
 function updateButtons() {
