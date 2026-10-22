@@ -17,7 +17,8 @@ let lists = store.get('vd.lists', []);
 let currentListId = store.get('vd.current', null);
 
 function newList(name) {
-  const list = { id: Date.now().toString(36), name: name || `Liste ${lists.length + 1}`, entries: [] };
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const list = { id, name: name || defaultListName(), entries: [] };
   lists.push(list);
   currentListId = list.id;
   saveLists();
@@ -26,10 +27,58 @@ function newList(name) {
 function currentList() {
   return lists.find((l) => l.id === currentListId) || lists[0] || newList();
 }
+function defaultListName() {
+  const d = new Date();
+  const date = d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+  const time = d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+  return `Liste vom ${date}, ${time}`;
+}
+// Jede Änderung an Listen/Vokabeln macht ein vorbereitetes Diktat ungültig
 function saveLists() {
   store.set('vd.lists', lists);
   store.set('vd.current', currentListId);
+  if (typeof resetDictation === 'function') resetDictation();
 }
+
+// ---------- Eigenes Dialogfenster ----------
+// confirm()/prompt() sind in eingebetteten Seiten (z. B. auf claude.ai) blockiert.
+function dialog(text, { buttons = [{ label: 'OK', value: true, primary: true }], input = null } = {}) {
+  return new Promise((resolve) => {
+    const modal = $('#modal');
+    const inp = $('#modal-input');
+    $('#modal-text').textContent = text;
+    inp.hidden = input === null;
+    inp.value = input || '';
+    const box = $('#modal-buttons');
+    box.innerHTML = '';
+    const close = (value) => {
+      modal.hidden = true;
+      document.removeEventListener('keydown', onKey);
+      resolve(value);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') close(null);
+      if (e.key === 'Enter' && input !== null) close(inp.value.trim() || null);
+    };
+    for (const b of buttons) {
+      const el = document.createElement('button');
+      el.className = 'btn' + (b.primary ? ' primary' : '') + (b.danger ? ' danger' : '');
+      el.textContent = b.label;
+      el.addEventListener('click', () => close(input !== null && b.value === true ? (inp.value.trim() || null) : b.value));
+      box.appendChild(el);
+    }
+    document.addEventListener('keydown', onKey);
+    modal.hidden = false;
+    (input !== null ? inp : box.lastChild).focus();
+  });
+}
+const confirmDialog = (text, okLabel) => dialog(text, {
+  buttons: [{ label: 'Abbrechen', value: false }, { label: okLabel, value: true, danger: true }],
+});
+const promptDialog = (text, value) => dialog(text, {
+  input: value || '',
+  buttons: [{ label: 'Abbrechen', value: null }, { label: 'OK', value: true, primary: true }],
+});
 
 // ---------- Tabs ----------
 function showTab(name) {
@@ -58,8 +107,12 @@ $('#file-input').addEventListener('change', (e) => handleFiles(e.target.files));
 async function handleFiles(fileList) {
   const files = Array.from(fileList || []);
   if (!files.length) return;
-  const list = $('#append').checked ? currentList() : newList();
+  const append = $('#append').checked;
+  // Neue Liste pro Upload – außer die aktuelle ist noch leer, dann diese benutzen
+  let list = append || !currentList().entries.length ? currentList() : null;
   let added = 0;
+  let skipped = 0;
+  const key = (e) => `${e.en}|${e.de}`.toLowerCase().replace(/\s+/g, ' ').trim();
   try {
     for (let i = 0; i < files.length; i++) {
       const prefix = files.length > 1 ? `Bild ${i + 1}/${files.length}: ` : '';
@@ -71,13 +124,18 @@ async function handleFiles(fileList) {
       const entries = method === 'sample' ? await recognizeWithSample(canvas, report)
         : method === 'claude' ? await recognizeWithClaude(canvas, report)
           : await recognizeWithTesseract(canvas, report);
-      entries.forEach((e) => list.entries.push({
-        en: e.en || '', de: e.de || '', note: cleanNote(e.note || ''), on: !e.optional,
-      }));
-      added += entries.length;
+      if (!list) list = newList();
+      const known = new Set(list.entries.map(key));
+      for (const e of entries) {
+        const item = { en: e.en || '', de: e.de || '', note: cleanNote(e.note || ''), on: !e.optional };
+        if (known.has(key(item))) { skipped++; continue; }
+        known.add(key(item));
+        list.entries.push(item);
+        added++;
+      }
+      saveLists(); // nach jedem Bild speichern, damit bei einem Fehler nichts verloren geht
     }
-    saveLists();
-    setStatus(`${added} Vokabeln erkannt. Bitte im nächsten Schritt prüfen.`);
+    setStatus(`${added} Vokabeln übernommen${skipped ? `, ${skipped} schon vorhandene übersprungen` : ''}. Bitte im nächsten Schritt prüfen.`);
     showTab('list');
   } catch (err) {
     console.error(err);
@@ -412,17 +470,32 @@ function renderList() {
   });
 }
 $('#list-select').addEventListener('change', (e) => { currentListId = e.target.value; saveLists(); renderList(); });
-$('#list-new').addEventListener('click', () => { newList(prompt('Name der Liste:') || undefined); renderList(); });
-$('#list-rename').addEventListener('click', () => {
-  const name = prompt('Neuer Name:', currentList().name);
+$('#list-new').addEventListener('click', async () => {
+  const name = await promptDialog('Name der neuen Liste:', defaultListName());
+  if (name === null) return;
+  newList(name); renderList();
+});
+$('#list-rename').addEventListener('click', async () => {
+  const name = await promptDialog('Neuer Name:', currentList().name);
   if (name) { currentList().name = name; saveLists(); renderList(); }
 });
-$('#list-delete').addEventListener('click', () => {
-  if (!confirm(`Liste „${currentList().name}“ wirklich löschen?`)) return;
-  lists = lists.filter((l) => l.id !== currentList().id);
+$('#list-delete').addEventListener('click', async () => {
+  const list = currentList();
+  if (!await confirmDialog(`Liste „${list.name}“ (${list.entries.length} Vokabeln) wirklich löschen?`, 'Löschen')) return;
+  lists = lists.filter((l) => l.id !== list.id);
   currentListId = lists[0]?.id || null;
   saveLists(); renderList();
 });
+$('#list-delete-all').addEventListener('click', async () => {
+  if (!await confirmDialog(`Wirklich ALLE ${lists.length} Listen löschen?`, 'Alle löschen')) return;
+  deleteAllLists();
+  renderList();
+});
+function deleteAllLists() {
+  lists = [];
+  currentListId = null;
+  newList(); // leere Liste zum Weiterarbeiten
+}
 $('#row-add').addEventListener('click', () => {
   currentList().entries.push({ en: '', de: '', note: '', on: true });
   saveLists(); renderList();
@@ -440,7 +513,7 @@ const PRESETS = {
   'de-en': { en: 'write', de: 'speak', note: 'off', order: 'de,en,note' },
 };
 const settingIds = ['preset', 'mode-en', 'mode-de', 'mode-note', 'order', 'rate', 'per-char', 'min-pause', 'repeats',
-  'spell-en', 'announce', 'shuffle', 'only-checked', 'show-text'];
+  'spell-en', 'announce', 'vocab-order', 'only-checked', 'show-text'];
 
 function applyPreset(name) {
   const p = PRESETS[name];
@@ -520,7 +593,9 @@ let order = [];
 
 function buildSteps() {
   let entries = currentList().entries.filter((e) => (e.en || e.de) && (!$('#only-checked').checked || e.on !== false));
-  if ($('#shuffle').checked) entries = shuffle([...entries]);
+  const vocabOrder = $('#vocab-order').value;
+  if (vocabOrder === 'reverse') entries = [...entries].reverse();
+  if (vocabOrder === 'shuffle') entries = shuffle([...entries]);
   order = entries;
   const fields = $('#order').value.split(',');
   const modes = { en: $('#mode-en').value, de: $('#mode-de').value, note: $('#mode-note').value };
@@ -604,7 +679,7 @@ function speak(text, lang, rate) {
     u.lang = v ? v.lang : (lang === 'de' ? 'de-DE' : 'en-GB');
     u.rate = (rate || 1) * Number($('#rate').value || 0.85);
     // Sicherheitsnetz: manche Browser lösen "end" nicht zuverlässig aus
-    const guard = setTimeout(resolve, 2000 + text.length * 250);
+    const guard = setTimeout(resolve, (3000 + u.text.length * 200) / u.rate);
     u.onend = u.onerror = () => { clearTimeout(guard); resolve(); };
     speechSynthesis.speak(u);
   });
@@ -663,8 +738,17 @@ $('#prev').addEventListener('click', () => { if (steps.length) jumpToEntry(Math.
 $('#repeat').addEventListener('click', () => { if (steps.length) jumpToEntry(currentEntryIdx()); });
 
 // Einstellungen geändert → Diktat neu aufbauen (beim nächsten Start)
-['#mode-en', '#mode-de', '#mode-note', '#order', '#preset', '#repeats', '#per-char', '#min-pause', '#spell-en', '#announce', '#shuffle', '#only-checked']
-  .forEach((s) => $(s).addEventListener('change', () => { stop(); steps = []; stepIndex = 0; updateNow(); }));
+['#mode-en', '#mode-de', '#mode-note', '#order', '#preset', '#repeats', '#per-char', '#min-pause', '#spell-en', '#announce', '#vocab-order', '#only-checked']
+  .forEach((s) => $(s).addEventListener('change', resetDictation));
+
+function resetDictation() {
+  stop();
+  steps = [];
+  stepIndex = 0;
+  order = [];
+  updateNow();
+  renderCheckList();
+}
 
 function updateButtons() {
   $('#play').textContent = playing ? '⏸ Pause' : (steps.length && stepIndex > 0 && stepIndex < steps.length ? '▶ Weiter' : '▶ Start');
@@ -714,3 +798,23 @@ $('#rate-val').textContent = `${$('#rate').value}×`;
 currentList();
 saveLists();
 renderList();
+askHowToStart();
+
+// Beim Öffnen fragen: mit gespeicherten Listen weitermachen oder neu anfangen?
+async function askHowToStart() {
+  const filled = lists.filter((l) => l.entries.length);
+  if (!filled.length) return;
+  const total = filled.reduce((n, l) => n + l.entries.length, 0);
+  const choice = await dialog(
+    `Willkommen zurück! Es sind noch ${filled.length} Liste(n) mit ${total} Vokabeln gespeichert.\n\nWie willst du weitermachen?`,
+    { buttons: [
+      { label: 'Neu anfangen (alte Listen löschen)', value: 'new', danger: true },
+      { label: 'Gespeicherte Listen weiter nutzen', value: 'keep', primary: true },
+    ] },
+  );
+  if (choice === 'new') {
+    deleteAllLists();
+    renderList();
+    showTab('import');
+  }
+}
